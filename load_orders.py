@@ -79,8 +79,6 @@ for file in files:
 
     df = df.rename(columns={'Идентификатор покупателя': 'custom_id'})
 
-print(df.info())
-
 # Создаем таблицу, если уже существует, то перезаписываем
 df.to_sql(
     'orders',
