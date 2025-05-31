@@ -5,7 +5,7 @@ from psycopg2 import sql
 import configparser
 import codecs
 import csv
-import io
+from io import StringIO
 
 # прописываем абсолютный путь до исполняемого файла
 dirname = os.path.dirname(__file__)
@@ -37,32 +37,60 @@ try:
     cur = conn.cursor()
 
     for file in files:
+        # Создаем временную таблицу для загрузки
+        temp_table = "temp_orders_" + os.path.basename(file).replace('.', '_')
+        cur.execute(sql.SQL("""
+                    CREATE TEMP TABLE {} AS 
+                    SELECT * FROM orders LIMIT 0
+                """).format(sql.Identifier(temp_table)))
         # Создаем буфер для преобразованных данных
-        output = io.StringIO()
-        writer = csv.writer(output)
+
         with open(file, 'r', encoding='utf-16') as f_orig:
             reader = csv.reader(f_orig)
             header = next(reader)  # Читаем заголовок
             numeric_columns = [6, 7, 8, 9 ]
 
-            writer.writerow(header)  # Пишем заголовок без изменений
-            for row_idx, row in enumerate(reader, start=2):
+            # Создаем буфер для порции данных
+            buffer = StringIO()
+            writer = csv.writer(buffer)
+            row_count = 0
+            batch_size = 5000  # Размер пакета для загрузки
+
+            for row in reader:
                 # Преобразуем числовые поля
                 for idx in numeric_columns:
                     if idx < len(row):
                         # Заменяем запятую на точку и удаляем пробелы
                         row[idx] = row[idx].replace(',', '.').replace(' ', '')
                 writer.writerow(row)
+                row_count += 1
 
-        # Сбрасываем буфер в начало
-        output.seek(0)
-        cur.copy_expert(
-            sql.SQL("COPY orders FROM STDIN WITH (FORMAT CSV, HEADER)"),
-            output
-        )
-        conn.commit()
-        print(f"Successfully loaded {os.path.basename(file)}")
+                # Загружаем порцию данных
+                if row_count % batch_size == 0:
+                    buffer.seek(0)
+                    cur.copy_expert(
+                        sql.SQL("COPY {} FROM STDIN WITH (FORMAT CSV, HEADER)").format(sql.Identifier(temp_table)),
+                        buffer
+                    )
+                    buffer = StringIO()  # Сбрасываем буфер
+                    writer = csv.writer(buffer)
 
+            # Загружаем оставшиеся данные
+            if buffer.tell() > 0:
+                buffer.seek(0)
+                cur.copy_expert(
+                    sql.SQL("COPY {} FROM STDIN WITH (FORMAT CSV, HEADER)").format(sql.Identifier(temp_table)),
+                    buffer
+                )
+
+            # Копируем данные из временной таблицы в основную
+            cur.execute(sql.SQL("""
+                            INSERT INTO orders 
+                            SELECT * FROM {}
+                        """).format(sql.Identifier(temp_table)))
+
+            conn.commit()
+            print(f"Successfully loaded {row_count} rows from {os.path.basename(file)}")
 except Exception as e:
     print(f"Error: {e}")
     conn.rollback()
